@@ -12,7 +12,8 @@ import dataset
 import torch
 import torch.backends.cudnn as cudnn
 import torch.optim
-from networks.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS
+from networks.TransBTS.TransBTS_aux_GR import TransBTS
+from networks.TransBTS.GradientReversal import *
 import torch.distributed as dist
 from networks import criterions
 
@@ -54,7 +55,7 @@ parser.add_argument('--train_file', default='train.txt', type=str)
 
 parser.add_argument('--valid_file', default='valid.txt', type=str)
 
-parser.add_argument('--dataset', default='breast', type=str)
+parser.add_argument('--dataset', default='breast2', type=str)
 
 parser.add_argument('--model_name', default='TransBTS', type=str)
 
@@ -99,7 +100,7 @@ parser.add_argument('--start_epoch', default=0, type=int)
 
 parser.add_argument('--end_epoch', default=120, type=int)
 
-parser.add_argument('--save_freq', default=10, type=int)
+parser.add_argument('--save_freq', default=5, type=int)
 
 parser.add_argument('--resume', default='', type=str)
 
@@ -112,7 +113,7 @@ args = parser.parse_args()
 
 def main_worker():
     #if args.local_rank == 0:
-    log_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log', args.experiment+args.date)
+    log_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log_aux3_1', args.experiment+args.date)
     log_file = log_dir + '.txt'
     log_args(log_file)
     logging.info('--------------------------------------This is all argsurations----------------------------------')
@@ -130,21 +131,28 @@ def main_worker():
     device_num = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
     print("DEVICE INFO:", device_num)
 
-    _, model = TransBTS(dataset='breast', _conv_repr=True, _pe_type="learned")
+    dataset_name = 'breast2'
+    data_loaders, data_sizes = build_breast_dataset(dataset_name=dataset_name, batch_size=args.batch_size)
+    train_loader = data_loaders['train']
+
+    #gradient_reverse = False
+    _, model = TransBTS(dataset=dataset_name, _conv_repr=True, _pe_type="learned")
+    
 
     #model.cuda(args.local_rank)
     #model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank,
     #                                            find_unused_parameters=True)
     model.to(device_num)
-    model.train()
+    # model.train()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, amsgrad=args.amsgrad)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, amsgrad=args.amsgrad)
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
     #criterion = getattr(criterions, args.criterion)
 
     #if args.local_rank == 0:
-    checkpoint_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'checkpoint', args.experiment+args.date)
+    checkpoint_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'checkpoint_aux3', args.experiment+args.date)
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
@@ -176,70 +184,95 @@ def main_worker():
 
     # train_loader = DataLoader(dataset=train_set, sampler=train_sampler, batch_size=args.batch_size // num_gpu,
     #                           drop_last=True, num_workers=args.num_workers, pin_memory=True)
-    data_loader, data_size = build_breast_dataset(dataset_name='breast', batch_size=args.batch_size)
-    train_loader = data_loader['train']
+    
 
     start_time = time.time()
 
     torch.set_grad_enabled(True)
-    criterion = nn.MSELoss()
+    mse_crit = nn.MSELoss()
+    bce_crit = nn.BCELoss()
 
     for epoch in range(args.start_epoch, args.end_epoch):
         #train_sampler.set_epoch(epoch)  # shuffle
         setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
         start_epoch = time.time()
-
+        total_loss = 0
+        mse_loss = 0
+        bce_loss = 0
+        gr_loss = 0
+        
         for i, data in enumerate(train_loader):
-
+            model.train()
+            optimizer.zero_grad()
             adjust_learning_rate(optimizer, epoch, args.end_epoch, args.lr)
 
-            x,_ = data
-            #x = (x+1)/2
-            #print(x)
+            # # This approach output only 1 label 0 for no augmenbtation, 1 for augmentation
+            x, label = data
+
             x = x.to(device_num)
-            #x = x.cuda(args.local_rank, non_blocking=True)
+            label = label.to(device_num)
+            #target_labels = torch.cat((label.unsqueeze(1).float()), dim=1)
+            target_labels = label.unsqueeze(1).float()
 
-            #target = target.cuda(args.local_rank, non_blocking=True)
+            # id data for MSE, MLP for both 
+            model.set_reverse(False)
+            x_id = x[label==0]
+            mse_id = 0
+            if x_id.shape[0] != 0: 
+                output_id, z_id = model(x_id)
+                mse_id = mse_crit(output_id, x_id)
+                print(mse_id)
+                # if mse_crit(output_id, x_id) > 3:
+                #     exit()
 
-            #print("x shape:", x.shape)
+            output, z_out = model(x)
+            loss = 0.75*mse_id + 0.25*bce_crit(z_out, target_labels)
+            loss.backward()
+            # optimizer.step()
 
-            output = model(x)
-
-            loss = criterion(output, x)
-            # reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
-
-            # if args.local_rank == 0:
-            #     logging.info('Epoch: {}_Iter:{}  loss: {:.5f} || 1:{:.4f} | 2:{:.4f} | 3:{:.4f} ||'
-            #                  .format(epoch, i, reduce_loss, reduce_loss1, reduce_loss2, reduce_loss3))
+            # ood 
+            x_ood = x[label==1]
+            print(x_ood.shape)
+            if x_ood.shape[0] != 0 and epoch > 20: 
+                model.set_reverse(True)
+                output_ood, z_out_ood = model(x_ood)
+                loss_GR = 0.25*mse_crit(output_ood, x_ood) # 
+                loss_GR.backward()
+                gr_loss += loss_GR
+            optimizer.step()
+                
+            
+            total_loss += loss
+            mse_loss += 0.75*mse_id
+            bce_loss += 0.25*bce_crit(z_out, target_labels)
+            
+            
             
             logging.info('Epoch: {}_Iter:{}  loss: {:.5f} '
                         .format(epoch, i, loss))
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # print("X shape:", x.shape)
-            # print("X min value:", torch.min(x))
-            # print("X max value:", torch.max(x))
-
-
-            # print("Output shape:", output.shape)
-            # print("output min value:", torch.min(output))
-            # print("output max value:", torch.max(output))
-
             if i % 100 == 0:
-                vutils.save_image(vutils.make_grid(x, nrow=4, normalize=True, scale_each=True), './log/real_samples'+str(epoch)+'.png')
-                vutils.save_image(vutils.make_grid(output, nrow=4, normalize=True, scale_each=True), './log/fake_samples'+str(epoch)+'.png')
-                
+                vutils.save_image(vutils.make_grid(x, nrow=4, normalize=True, scale_each=True), './log_aux3_1/real_samples'+str(epoch)+'.png')
+                vutils.save_image(vutils.make_grid(output, nrow=4, normalize=True, scale_each=True), './log_aux3_1/fake_samples'+str(epoch)+'.png')
+            #print("OOD check")
+        
+        loss_avg = total_loss/(len(train_loader))
+        mse_avg = mse_loss/(len(train_loader))
+        bce_avg = bce_loss/(len(train_loader))
+        gr_avg = gr_loss/(len(train_loader)-20)
         end_epoch = time.time()
+        if mse_avg > 2:
+            exit()
         writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
-        writer.add_scalar('loss:', loss, epoch)
+        writer.add_scalar('Total loss:', loss_avg, epoch)
+        writer.add_scalar("MSE loss", mse_avg, epoch)
+        writer.add_scalar("BCE loss", bce_avg, epoch)
+        writer.add_scalar("GR MSE loss", gr_avg, epoch)
+
         writer.add_images("Input", x, epoch)
         writer.add_images("Reconstruct", output, epoch)
+        # writer.add_images("Input OOD", x_ood, epoch)
+        # writer.add_images("Reconstruct OOD", output_ood, epoch)
         #if args.local_rank == 0:
         if (epoch + 1) % int(args.save_freq) == 0 :
             file_name = os.path.join(checkpoint_dir, 'model_epoch_{}.pth'.format(epoch))
@@ -249,17 +282,12 @@ def main_worker():
                 'optim_dict': optimizer.state_dict(),
             },
                 file_name)
-            
-            
-            # writer.add_scalar('loss1:', reduce_loss1, epoch)
-            # writer.add_scalar('loss2:', reduce_loss2, epoch)
-            # writer.add_scalar('loss3:', reduce_loss3, epoch)
 
-        #if args.local_rank == 0:
         epoch_time_minute = (end_epoch-start_epoch)/60
         remaining_time_hour = (args.end_epoch-epoch-1)*epoch_time_minute/60
         logging.info('Current epoch time consumption: {:.2f} minutes!'.format(epoch_time_minute))
         logging.info('Estimated remaining training time: {:.2f} hours!'.format(remaining_time_hour))
+    
 
     #if args.local_rank == 0:
     writer.close()
@@ -286,29 +314,25 @@ def adjust_learning_rate(optimizer, epoch, max_epoch, init_lr, power=0.9):
 def log_args(log_file):
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    # logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
         '%(asctime)s ===> %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S')
 
-    # args FileHandler to save log file
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(formatter)
+    # # args FileHandler to save log file
+    # fh = logging.FileHandler(log_file)
+    # fh.setLevel(logging.DEBUG)
+    # fh.setFormatter(formatter)
 
-    # args StreamHandler to print log to console
-    #ch = logging.StreamHandler()
-    #ch.setLevel(logging.DEBUG)
-    #ch.setFormatter(formatter)
+    # # args StreamHandler to print log to console
+    # ch = logging.StreamHandler()
+    # ch.setLevel(logging.DEBUG)
+    # ch.setFormatter(formatter)
 
     # # add the two Handler
-    #logger.addHandler(ch)
-    logger.addHandler(fh)
+    # logger.addHandler(ch)
+    # logger.addHandler(fh)
 
 
 if __name__ == '__main__':
-    # os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    # assert torch.cuda.is_available(), "Currently, we only support CUDA version"
-    # torch.backends.cudnn.enabled = True
-    # torch.backends.cudnn.benchmark = True
     main_worker()

@@ -12,7 +12,7 @@ import dataset
 import torch
 import torch.backends.cudnn as cudnn
 import torch.optim
-from networks.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS
+from networks.TransBTS.TransBTS_aux import TransBTS
 import torch.distributed as dist
 from networks import criterions
 
@@ -54,7 +54,7 @@ parser.add_argument('--train_file', default='train.txt', type=str)
 
 parser.add_argument('--valid_file', default='valid.txt', type=str)
 
-parser.add_argument('--dataset', default='breast', type=str)
+parser.add_argument('--dataset', default='breast1', type=str)
 
 parser.add_argument('--model_name', default='TransBTS', type=str)
 
@@ -99,7 +99,7 @@ parser.add_argument('--start_epoch', default=0, type=int)
 
 parser.add_argument('--end_epoch', default=120, type=int)
 
-parser.add_argument('--save_freq', default=10, type=int)
+parser.add_argument('--save_freq', default=5, type=int)
 
 parser.add_argument('--resume', default='', type=str)
 
@@ -112,7 +112,7 @@ args = parser.parse_args()
 
 def main_worker():
     #if args.local_rank == 0:
-    log_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log', args.experiment+args.date)
+    log_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log_aux', args.experiment+args.date)
     log_file = log_dir + '.txt'
     log_args(log_file)
     logging.info('--------------------------------------This is all argsurations----------------------------------')
@@ -130,7 +130,9 @@ def main_worker():
     device_num = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
     print("DEVICE INFO:", device_num)
 
-    _, model = TransBTS(dataset='breast', _conv_repr=True, _pe_type="learned")
+    dataset_name = 'breast1'
+    _, model = TransBTS(dataset=dataset_name, _conv_repr=True, _pe_type="learned")
+    
 
     #model.cuda(args.local_rank)
     #model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank,
@@ -144,7 +146,7 @@ def main_worker():
     #criterion = getattr(criterions, args.criterion)
 
     #if args.local_rank == 0:
-    checkpoint_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'checkpoint', args.experiment+args.date)
+    checkpoint_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'checkpoint_aux2', args.experiment+args.date)
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
@@ -176,44 +178,60 @@ def main_worker():
 
     # train_loader = DataLoader(dataset=train_set, sampler=train_sampler, batch_size=args.batch_size // num_gpu,
     #                           drop_last=True, num_workers=args.num_workers, pin_memory=True)
-    data_loader, data_size = build_breast_dataset(dataset_name='breast', batch_size=args.batch_size)
+    data_loader, data_size = build_breast_dataset(dataset_name=dataset_name, batch_size=args.batch_size)
     train_loader = data_loader['train']
 
     start_time = time.time()
 
     torch.set_grad_enabled(True)
     criterion = nn.MSELoss()
+    criterion2 = nn.BCELoss()
 
     for epoch in range(args.start_epoch, args.end_epoch):
         #train_sampler.set_epoch(epoch)  # shuffle
         setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
         start_epoch = time.time()
-
+        total_loss = 0
+        mse_loss = 0
+        bce_loss = 0
         for i, data in enumerate(train_loader):
 
             adjust_learning_rate(optimizer, epoch, args.end_epoch, args.lr)
 
-            x,_ = data
-            #x = (x+1)/2
-            #print(x)
+            # # This approach output 6 labels for different augmentations
+            # x, label, r_label, i_label, cj_label, m_label, ntr_label = data
+
+            # x = x.to(device_num)
+            # label = label.to(device_num)
+            # r_label = r_label.to(device_num)
+            # i_label = i_label.to(device_num)
+            # cj_label = cj_label.to(device_num)
+            # m_label = m_label.to(device_num)
+            # ntr_label = ntr_label.to(device_num)
+            # target_labels = torch.cat((label.unsqueeze(1).float(), r_label.unsqueeze(1).float(), i_label.unsqueeze(1).float(), 
+            #                            cj_label.unsqueeze(1).float(), m_label.unsqueeze(1).float(), ntr_label.unsqueeze(1).float()), dim=1)
+
+            # # This approach output only 1 label 0 for no augmenbtation, 1 for augmentation
+            x, label = data
+
             x = x.to(device_num)
-            #x = x.cuda(args.local_rank, non_blocking=True)
+            label = label.to(device_num)
+            #target_labels = torch.cat((label.unsqueeze(1).float()), dim=1)
+            target_labels = label.unsqueeze(1).float()
 
-            #target = target.cuda(args.local_rank, non_blocking=True)
-
-            #print("x shape:", x.shape)
-
-            output = model(x)
-
-            loss = criterion(output, x)
-            # reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
-            # reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
-
-            # if args.local_rank == 0:
-            #     logging.info('Epoch: {}_Iter:{}  loss: {:.5f} || 1:{:.4f} | 2:{:.4f} | 3:{:.4f} ||'
-            #                  .format(epoch, i, reduce_loss, reduce_loss1, reduce_loss2, reduce_loss3))
+            output, z_out = model(x)
+            #z_out = z_out.squeeze(1)
+            #print("z_out shape:", z_out.shape) # [8, 1]
+            #print("target labels shape:", target_labels.shape) # [8, 1]
+            #print("label shape:", torch.cat((label.unsqueeze(1).float(), r_label.unsqueeze(1).float(), n_label.unsqueeze(1).float(), i_label.unsqueeze(1).float()), dim=1).shape) #[8]
+            #print(criterion2(z_out, [label.float(), r_label.float(), n_label.float()]))
+            loss = 0.5*criterion(output, x) + 0.5*criterion2(z_out, target_labels)
+            # print("MSE loss:", criterion(output, x))
+            # print("BCE loss:", criterion2(z_out, torch.cat((label.unsqueeze(1).float(), r_label.unsqueeze(1).float(), n_label.unsqueeze(1).float(), i_label.unsqueeze(1).float()), dim=1)))
+            print("total loss:", loss)
+            total_loss += loss
+            mse_loss += 0.5*criterion(output, x)
+            bce_loss += 0.5*criterion2(z_out, target_labels)
             
             logging.info('Epoch: {}_Iter:{}  loss: {:.5f} '
                         .format(epoch, i, loss))
@@ -232,12 +250,17 @@ def main_worker():
             # print("output max value:", torch.max(output))
 
             if i % 100 == 0:
-                vutils.save_image(vutils.make_grid(x, nrow=4, normalize=True, scale_each=True), './log/real_samples'+str(epoch)+'.png')
-                vutils.save_image(vutils.make_grid(output, nrow=4, normalize=True, scale_each=True), './log/fake_samples'+str(epoch)+'.png')
-                
+                vutils.save_image(vutils.make_grid(x, nrow=4, normalize=True, scale_each=True), './log_aux2/real_samples'+str(epoch)+'.png')
+                vutils.save_image(vutils.make_grid(output, nrow=4, normalize=True, scale_each=True), './log_aux2/fake_samples'+str(epoch)+'.png')
+        
+        loss_avg = total_loss/len(train_loader)
+        mse_avg = mse_loss/len(train_loader)
+        bce_avg = bce_loss/len(train_loader)
         end_epoch = time.time()
         writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
-        writer.add_scalar('loss:', loss, epoch)
+        writer.add_scalar('Total loss:', loss_avg, epoch)
+        writer.add_scalar("MSE loss", mse_avg, epoch)
+        writer.add_scalar("BCE loss", bce_avg, epoch)
         writer.add_images("Input", x, epoch)
         writer.add_images("Reconstruct", output, epoch)
         #if args.local_rank == 0:
@@ -286,24 +309,24 @@ def adjust_learning_rate(optimizer, epoch, max_epoch, init_lr, power=0.9):
 def log_args(log_file):
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    # logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
         '%(asctime)s ===> %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S')
 
-    # args FileHandler to save log file
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(formatter)
+    # # args FileHandler to save log file
+    # fh = logging.FileHandler(log_file)
+    # fh.setLevel(logging.DEBUG)
+    # fh.setFormatter(formatter)
 
-    # args StreamHandler to print log to console
-    #ch = logging.StreamHandler()
-    #ch.setLevel(logging.DEBUG)
-    #ch.setFormatter(formatter)
+    # # args StreamHandler to print log to console
+    # ch = logging.StreamHandler()
+    # ch.setLevel(logging.DEBUG)
+    # ch.setFormatter(formatter)
 
     # # add the two Handler
-    #logger.addHandler(ch)
-    logger.addHandler(fh)
+    # logger.addHandler(ch)
+    # logger.addHandler(fh)
 
 
 if __name__ == '__main__':
