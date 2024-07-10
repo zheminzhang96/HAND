@@ -1,25 +1,14 @@
-# TransBTS（MICCAI2021）& TransBTSV2 (To Be Updated)
+# Unsupervised Hybrid framework for ANomaly Dection (HAND) -- applied to Screening Mammogram 
 
-This repo is the official implementation for: 
-1) [TransBTS: Multimodal Brain Tumor Segmentation Using Transformer](https://arxiv.org/abs/2103.04430). 
-
-2) [TransBTSV2: Towards Better and More Efficient Volumetric Segmentation of Medical Images](https://arxiv.org/abs/2201.12785). 
-
-The details of the our TransBTS and TransBTSV2 can be found at the models directory ([TransBTS](https://github.com/Wenxuan-1119/TransBTS/tree/main/models/TransBTS) and [TransBTSV2](https://github.com/Wenxuan-1119/TransBTS/tree/main/models/TransBTSV2)) in this repo or in the original paper.
 
 ## Requirements
-- python 3.7
+- python 3.11
 - pytorch 1.6.0
 - torchvision 0.7.0
-- pickle
 - nibabel
 
 ## Data Acquisition
-- The multimodal brain tumor datasets (**BraTS 2019** & **BraTS 2020**) could be acquired from [here](https://ipp.cbica.upenn.edu/).
-
-- The liver tumor dataset **LiTS 2017** could be acquired from [here](https://competitions.codalab.org/competitions/17094#participate-get-data).
-
-- The kidney tumor dataset **KiTS 2019** could be acquired from [here](https://kits19.grand-challenge.org/data/).
+- RSNA Screening Mammography Breast Cancer Detection AI Challenge (2023) dataset: https://www.rsna.org/rsnai/ai-image-challenge/screening-mammography-breast-cancer-detection-ai-challenge
 
 ## Data Preprocess (BraTS 2019 & BraTS 2020)
 After downloading the dataset from [here](https://ipp.cbica.upenn.edu/), data preprocessing is needed which is to convert the .nii files as .pkl files and realize data normalization.
